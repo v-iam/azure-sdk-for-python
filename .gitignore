@@ -21,6 +21,7 @@ build/
 
 # Test results
 TestResults/
+.coverage
 
 # Credentials 
 credentials_real.json
@@ -61,3 +62,6 @@ src/build
 
 # [begoldsm] ignore virtual env if it exists.
 adlEnv/
+
+# VS/VSCode editor stuff
+.vscode

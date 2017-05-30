@@ -217,7 +217,8 @@ class BatchMgmtTestCase(RecordingTestCase):
             cls.batch_client_sk, cls.batch_client_aad = create_batch_account(cls.batch_mgmt_client, cls.settings, cls.live)
         except Exception as err:
             cls.tearDownClass()
-            raise AssertionError("Failed to setup Batch Account: {}".format(err))
+            raise
+            # raise AssertionError("Failed to setup Batch Account: {}".format(err))
         LOG.debug("    finished setup")
         return super(BatchMgmtTestCase, cls).setUpClass()
 

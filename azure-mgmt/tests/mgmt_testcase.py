@@ -9,6 +9,7 @@ import time
 from azure.mgmt.resource import ResourceManagementClient
 
 from azure_devtools.scenario_tests.base import ScenarioTest
+from azure_devtools.scenario_tests.config import TestConfig, RecordMode
 from azure_devtools.scenario_tests.const import DUMMY_HEADER_DEACTIVATE_VCR_RECORDING
 
 from azure.common.exceptions import (
@@ -18,10 +19,7 @@ from azure_devtools.scenario_tests.preparers import (
     AbstractPreparer,
     SingleValueReplacer,
 )
-from testutils.common_recordingtestcase import (
-    RecordingTestCase,
-    TestMode,
-)
+from testutils.const import TEST_SETTING_FILENAME
 import tests.mgmt_settings_fake as fake_settings
 
 
@@ -41,75 +39,18 @@ class HttpStatusCode(object):
     NotFound = 404
 
 
-class AzureMgmtPreparer(AbstractPreparer, SingleValueReplacer):
-    def __init__(self, **kwargs):
-        super(AzureMgmtPreparer, self).__init__(self, **kwargs)
-        self.fake_settings = fake_settings
-        if TestMode.is_playback(self.test_mode):
-            self.settings = self.fake_settings
-        else:
-            import tests.mgmt_settings_real as real_settings
-            self.settings = real_settings
-
-    def _make_unrecorded_request(self, func, *args, **kwargs):
-        kwargs.setdefault('custom_headers', {})[DUMMY_HEADER_DEACTIVATE_VCR_RECORDING] = ''
-        return func(*args, **kwargs)
-
-    def create_basic_client(self, client_class, **kwargs):
-        # Whatever the client, if credentials is None, fail
-        with self.assertRaises(ValueError):
-            client = client_class(
-                credentials=None,
-                **kwargs
-            )
-        # Whatever the client, if accept_language is not str, fail
-        with self.assertRaises(TypeError):
-            client = client_class(
-                credentials=self.settings.get_credentials(),
-                accept_language=42,
-                **kwargs
-            )
-
-        # Real client creation
-        client = client_class(
-            credentials=self.settings.get_credentials(),
-            **kwargs
-        )
-        if self.is_playback():
-            client.config.long_running_operation_timeout = 0
-        return client
-
-    def create_mgmt_client(self, client_class, **kwargs):
-        # Whatever the client, if subscription_id is None, fail
-        with self.assertRaises(ValueError):
-            self.create_basic_client(
-                client_class,
-                subscription_id=None,
-                **kwargs
-            )
-        # Whatever the client, if subscription_id is not a string, fail
-        with self.assertRaises(TypeError):
-            self.create_basic_client(
-                client_class,
-                subscription_id=42,
-                **kwargs
-            )
-
-        return self.create_basic_client(
-            client_class,
-            subscription_id=self.settings.SUBSCRIPTION_ID,
-            **kwargs
-        )
-
 class AzureMgmtTestCase(ScenarioTest):
+    def __init__(self, *args, **kwargs):
+        self.working_folder = os.path.dirname(__file__)
+        kwargs.setdefault('config_file',
+                          os.path.join(self.working_folder, TEST_SETTING_FILENAME))
+        super(ScenarioTest, self).__init__(self, *args, **kwargs)
 
     def setUp(self):
-        self.working_folder = os.path.dirname(__file__)
-
         super(AzureMgmtTestCase, self).setUp()
 
         self.fake_settings = fake_settings
-        if TestMode.is_playback(self.test_mode):
+        if self.config.record_mode == RecordMode.none:
             self.settings = self.fake_settings
         else:
             import tests.mgmt_settings_real as real_settings
@@ -137,7 +78,7 @@ class AzureMgmtTestCase(ScenarioTest):
         )
         self.region = 'westus'
 
-        if not self.is_playback():
+        if self.config.record_mode == RecordMode.all:
             self.delete_resource_group(wait_timeout=600)
 
     def tearDown(self):
@@ -201,6 +142,27 @@ class AzureMgmtTestCase(ScenarioTest):
         return val
 
 
+class AzureMgmtPreparer(AbstractPreparer, SingleValueReplacer):
+    def __init__(self, **kwargs):
+        super(AzureMgmtPreparer, self).__init__(self, **kwargs)
+
+    def _make_unrecorded_request(self, test_config, func, *args, **kwargs):
+        if test_config.record_mode == RecordMode.none:
+            return None
+        elif test_config.record_mode == RecordMode.all:
+            kwargs.setdefault('custom_headers', {})[DUMMY_HEADER_DEACTIVATE_VCR_RECORDING] = ''
+            return func(*args, **kwargs)
+        else:
+            # What would we do for RecordMode.once?
+            # If there's a recording, we'd want to bypass the request altogether.
+            # If not, we need to make the request but disallow recording.
+            # But do we really want to have to check for the existence of a recording
+            # in the preparer?
+            # Easiest just to disallow 'once' mode for these tests.
+            # This isn't a regression since we had no 'once' mode before either.
+            raise RuntimeError('Can only use "none" or "all" record mode with these tests')
+
+
 class ResourceGroupPreparer(AzureMgmtPreparer):
     def __init__(self, name_prefix='sdktest.rg',
                  parameter_name='resource_group_name',
@@ -217,10 +179,12 @@ class ResourceGroupPreparer(AzureMgmtPreparer):
             azure.mgmt.resource.ResourceManagementClient
         )
 
-    def create_resource(self, name, **kwargs):
+    def create_resource(self, name, test_config, **kwargs):
         self.group = self._make_unrecorded_request(
+            test_config,
             self.client.resource_groups.create_or_update,
-            name, {'location': self.region}
+            name,
+            location=self.region
         )
         return {
             self.parameter_name: name,
@@ -228,10 +192,11 @@ class ResourceGroupPreparer(AzureMgmtPreparer):
             self.parameter_name_for_client: self.client,
         }
 
-    def remove_resource(self, name, **kwargs):
+    def remove_resource(self, name, test_config, **kwargs):
         try:
-            if wait_timeout:
+            if wait_timeout and test_config.record_mode == RecordMode.all:
                 azure_poller = self._make_unrecorded_request(
+                    test_config,
                     self.resource_client.resource_groups.delete,
                     name
                 )
@@ -241,6 +206,7 @@ class ResourceGroupPreparer(AzureMgmtPreparer):
                 self.assertTrue(False, 'Timed out waiting for resource group to be deleted.')            
             else:
                 self._make_unrecorded_request(
+                    test_config,
                     self.resource_client.resource_groups.delete,
                     name,
                     raw=True

@@ -9,8 +9,15 @@ import unittest
 
 import azure.mgmt.media
 import azure.mgmt.storage
-from testutils.common_recordingtestcase import record
-from tests.mgmt_testcase import HttpStatusCode, AzureMgmtTestCase
+
+from tests.mgmt_testcase import AzureMgmtTestCase, ResourceGroupPreparer
+from tests.storage_testcase import StorageAccountPreparer
+
+PLAYBACK_STORAGE_ID = (
+    '/subscriptions/00000000-0000-0000-0000-000000000000/'
+    'resourceGroups/test_mgmt_media_test_media8fdd0a81/'
+    'providers/Microsoft.Storage/storageAccounts/msmediapttest'
+)
 
 
 class MgmtMediaTest(AzureMgmtTestCase):
@@ -41,11 +48,11 @@ class MgmtMediaTest(AzureMgmtTestCase):
             self.storage_id = self.storage_account.id
         else:
             self.storage_id = ('/subscriptions/00000000-0000-0000-0000-000000000000/'
-                                'resourceGroups/test_mgmt_media_test_media8fdd0a81/'
-                                'providers/Microsoft.Storage/storageAccounts/msmediapttest')
+                               'resourceGroups/test_mgmt_media_test_media8fdd0a81/'
+                               'providers/Microsoft.Storage/storageAccounts/msmediapttest')
 
-
-    @record
+    @ResourceGroupPreparer()
+    @StorageAccountPreparer(name_prefix='msmediapttest')
     def test_media(self):
         media_name = self.get_resource_name('pymedia')
 

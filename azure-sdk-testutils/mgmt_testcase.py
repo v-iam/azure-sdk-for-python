@@ -3,6 +3,7 @@
 # Licensed under the MIT License. See License.txt in the project root for
 # license information.
 #--------------------------------------------------------------------------
+from collections import namedtuple
 import inspect
 import os.path
 import zlib
@@ -14,6 +15,15 @@ from azure_devtools.scenario_tests import (ReplayableTest, AzureTestError,
                                            AbstractPreparer, SingleValueReplacer)
 from testutils.config import TEST_SETTING_FILENAME
 import mgmt_settings_fake as fake_settings
+
+
+RESOURCE_GROUP_PARAM = 'resource_group'
+
+
+FakeResource = namedtuple(
+    'FakeResource',
+    ['name', 'id']
+)
 
 
 should_log = os.getenv('SDK_TESTS_LOG', '0')
@@ -170,6 +180,14 @@ class AzureMgmtTestCase(ReplayableTest):
 
 
 class AzureMgmtPreparer(AbstractPreparer, SingleValueReplacer):
+    def __init__(self, name_prefix, random_name_length,
+                 disable_recording=True,
+                 playback_fake_resource=None):
+        super(AzureMgmtPreparer, self).__init__(name_prefix, random_name_length,
+                                                disable_recording=disable_recording)
+        self.client = None
+        self.resource = playback_fake_resource
+
     @property
     def is_live(self):
         return self.test_class_instance.is_live
@@ -191,36 +209,35 @@ class AzureMgmtPreparer(AbstractPreparer, SingleValueReplacer):
         return self.resource_moniker
 
     def create_mgmt_client(self, client_class, **kwargs):
-        if self.is_live:
-            return client_class(
-                credentials=self.test_class_instance.settings.get_credentials(),
-                **kwargs
-            )
-        else:
-            # Not sure what to do here
-            return None
+        return client_class(
+            credentials=self.test_class_instance.settings.get_credentials(),
+            **kwargs
+        )
 
 
 class ResourceGroupPreparer(AzureMgmtPreparer):
     def __init__(self, name_prefix='sdktest.rg',
                  random_name_length=75,
-                 parameter_name='resource_group_name',
+                 parameter_name=RESOURCE_GROUP_PARAM,
                  parameter_name_for_location='location', location='westus',
-                 disable_recording=True):
+                 disable_recording=True, playback_fake_resource=None):
         super(ResourceGroupPreparer, self).__init__(name_prefix, random_name_length,
-                                                    disable_recording=disable_recording)
+                                                    disable_recording=disable_recording,
+                                                    playback_fake_resource=playback_fake_resource)
         self.location = location
         self.parameter_name = parameter_name
         self.parameter_name_for_location = parameter_name_for_location
 
-        self.client = None
-
     def create_resource(self, name, **kwargs):
-        self.client = self.create_mgmt_client(ResourceManagementClient)
         if self.is_live:
-            self.client.resource_groups.create_or_update(name, {'location': self.location})
+            self.client = self.create_mgmt_client(ResourceManagementClient)
+            self.resource = self.client.resource_groups.create_or_update(
+                name, {'location': self.location}
+            )
+        else:
+            self.resource = self.resource or FakeResource(name=name, id='')
         return {
-            self.parameter_name: name,
+            self.parameter_name: self.resource,
             self.parameter_name_for_location: self.location,
         }
 

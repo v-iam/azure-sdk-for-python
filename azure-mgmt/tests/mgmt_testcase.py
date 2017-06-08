@@ -3,23 +3,16 @@
 # Licensed under the MIT License. See License.txt in the project root for
 # license information.
 #--------------------------------------------------------------------------
-import json
+import inspect
 import os.path
-import time
+import zlib
+
+from azure.common.exceptions import CloudError
 from azure.mgmt.resource import ResourceManagementClient
 
-from azure_devtools.scenario_tests.base import ScenarioTest
-from azure_devtools.scenario_tests.config import TestConfig, RecordMode
-from azure_devtools.scenario_tests.const import DUMMY_HEADER_DEACTIVATE_VCR_RECORDING
-
-from azure.common.exceptions import (
-    CloudError
-)
-from azure_devtools.scenario_tests.preparers import (
-    AbstractPreparer,
-    SingleValueReplacer,
-)
-from testutils.const import TEST_SETTING_FILENAME
+from azure_devtools.scenario_tests import (ReplayableTest, AzureTestError,
+                                           AbstractPreparer, SingleValueReplacer)
+from testutils.config import TEST_SETTING_FILENAME
 import tests.mgmt_settings_fake as fake_settings
 
 
@@ -39,24 +32,51 @@ class HttpStatusCode(object):
     NotFound = 404
 
 
-class AzureMgmtTestCase(ScenarioTest):
+def get_resource_name(name_prefix, identifier):
+    # Append a suffix to the name, based on the fully qualified test name
+    # We use a checksum of the test name so that each test gets different
+    # resource names, but each test will get the same name on repeat runs,
+    # which is needed for playback.
+    # Most resource names have a length limit, so we use a crc32
+    checksum = zlib.adler32(identifier) & 0xffffffff
+    name = '{}{}'.format(name_prefix, hex(checksum)[2:]).rstrip('L')
+    if name.endswith('L'):
+        name = name[:-1]
+    return name
+
+
+def get_qualified_test_name(test_object, method_name):
+    # example of qualified test name:
+    # test_mgmt_network.test_public_ip_addresses
+    _, filename = os.path.split(inspect.getsourcefile(type(test_object)))
+    module_name, _ = os.path.splitext(filename)
+    return '{0}.{1}'.format(module_name, method_name)
+
+
+class AzureMgmtTestCase(ReplayableTest):
     def __init__(self, *args, **kwargs):
         self.working_folder = os.path.dirname(__file__)
+
         kwargs.setdefault('config_file',
                           os.path.join(self.working_folder, TEST_SETTING_FILENAME))
-        super(ScenarioTest, self).__init__(self, *args, **kwargs)
+
+        self.qualified_test_name = get_qualified_test_name(self, args[0])
+        kwargs.setdefault('recording_name', self.qualified_test_name)
+
+        super(AzureMgmtTestCase, self).__init__(*args, **kwargs)
+
+    def is_playback(self):
+        return not self.is_live
 
     def setUp(self):
         super(AzureMgmtTestCase, self).setUp()
 
         self.fake_settings = fake_settings
-        if self.config.record_mode == RecordMode.none:
-            self.settings = self.fake_settings
-        else:
+        if self.is_live:
             import tests.mgmt_settings_real as real_settings
             self.settings = real_settings
-
-        self.resource_client = self.create_mgmt_client(ResourceManagementClient)
+        else:
+            self.settings = self.fake_settings
 
         # Every test uses a different resource group name calculated from its
         # qualified test name.
@@ -73,17 +93,12 @@ class AzureMgmtTestCase(ScenarioTest):
         # would make resource group creation fail.
         # To avoid that, we also delete the resource group in the
         # setup, and we wait for that delete to complete.
-        self.group_name = self.get_resource_name(
-            self.qualified_test_name.replace('.', '_')
-        )
+        #self.group_name = self.get_resource_name(
+        #    self.qualified_test_name.replace('.', '_')
+        #)
         self.region = 'westus'
 
-        if self.config.record_mode == RecordMode.all:
-            self.delete_resource_group(wait_timeout=600)
-
     def tearDown(self):
-        if not self.is_playback():
-            self.delete_resource_group(wait_timeout=None)
         return super(AzureMgmtTestCase, self).tearDown()
 
     def create_basic_client(self, client_class, **kwargs):
@@ -132,6 +147,17 @@ class AzureMgmtTestCase(ScenarioTest):
             **kwargs
         )
 
+    def create_random_name(self, name):
+        return get_resource_name(name, self.qualified_test_name.encode())
+
+    def get_resource_name(self, name):
+        """Alias to create_random_name for back compatibility."""
+        return self.create_random_name(name)
+
+    def get_preparer_resource_name(self):
+        """Random name generation for use by preparers."""
+        return self.get_resource_name(self.qualified_test_name.replace('.', '_'))
+
     def _scrub(self, val):
         val = super(AzureMgmtTestCase, self)._scrub(val)
         real_to_fake_dict = {
@@ -143,73 +169,70 @@ class AzureMgmtTestCase(ScenarioTest):
 
 
 class AzureMgmtPreparer(AbstractPreparer, SingleValueReplacer):
-    def __init__(self, **kwargs):
-        super(AzureMgmtPreparer, self).__init__(self, **kwargs)
+    @property
+    def is_live(self):
+        return self.test_class_instance.is_live
 
-    def _make_unrecorded_request(self, test_config, func, *args, **kwargs):
-        if test_config.record_mode == RecordMode.none:
-            return None
-        elif test_config.record_mode == RecordMode.all:
-            kwargs.setdefault('custom_headers', {})[DUMMY_HEADER_DEACTIVATE_VCR_RECORDING] = ''
-            return func(*args, **kwargs)
+    @property
+    def moniker(self):
+        """Override moniker generation for backwards compatibility.
+
+        azure-devtools preparers, by default, generate "monikers" which replace
+        resource names in request URIs by tacking on a resource count to
+        name_prefix. By contrast, SDK tests used the fully qualified (module + method)
+        test name and the hashing process in get_resource_name.
+
+        This property override implements the SDK test name generation so that
+        the URIs don't change and tests don't need to be re-recorded.
+        """
+        if not self.resource_moniker:
+            self.resource_moniker = self.test_class_instance.get_preparer_resource_name()
+        return self.resource_moniker
+
+    def create_mgmt_client(self, client_class, **kwargs):
+        if self.is_live:
+            return client_class(
+                credentials=self.test_class_instance.settings.get_credentials(),
+                **kwargs
+            )
         else:
-            # What would we do for RecordMode.once?
-            # If there's a recording, we'd want to bypass the request altogether.
-            # If not, we need to make the request but disallow recording.
-            # But do we really want to have to check for the existence of a recording
-            # in the preparer?
-            # Easiest just to disallow 'once' mode for these tests.
-            # This isn't a regression since we had no 'once' mode before either.
-            raise RuntimeError('Can only use "none" or "all" record mode with these tests')
+            # Not sure what to do here
+            return None
 
 
 class ResourceGroupPreparer(AzureMgmtPreparer):
     def __init__(self, name_prefix='sdktest.rg',
+                 random_name_length=75,
                  parameter_name='resource_group_name',
                  parameter_name_for_location='location', location='westus',
-                 parameter_name_for_client='resource_client',
-                 random_name_length=75):
-        super(ResourceGroupPreparer, self).__init__(name_prefix, random_name_length)
+                 disable_recording=True):
+        super(ResourceGroupPreparer, self).__init__(name_prefix, random_name_length,
+                                                    disable_recording=disable_recording)
         self.location = location
         self.parameter_name = parameter_name
         self.parameter_name_for_location = parameter_name_for_location
-        self.parameter_name_for_client = parameter_name_for_client
 
-        self.client = self.create_mgmt_client(
-            azure.mgmt.resource.ResourceManagementClient
-        )
+        self.client = None
 
-    def create_resource(self, name, test_config, **kwargs):
-        self.group = self._make_unrecorded_request(
-            test_config,
-            self.client.resource_groups.create_or_update,
-            name,
-            location=self.region
-        )
+    def create_resource(self, name, **kwargs):
+        self.client = self.create_mgmt_client(ResourceManagementClient)
+        if self.is_live:
+            self.client.resource_groups.create_or_update(name, {'location': self.location})
         return {
             self.parameter_name: name,
             self.parameter_name_for_location: self.location,
-            self.parameter_name_for_client: self.client,
         }
 
-    def remove_resource(self, name, test_config, **kwargs):
-        try:
-            if wait_timeout and test_config.record_mode == RecordMode.all:
-                azure_poller = self._make_unrecorded_request(
-                    test_config,
-                    self.resource_client.resource_groups.delete,
-                    name
-                )
-                azure_poller.wait(kw.get('wait_timeout'))
-                if azure_poller.done():
-                    return
-                self.assertTrue(False, 'Timed out waiting for resource group to be deleted.')            
-            else:
-                self._make_unrecorded_request(
-                    test_config,
-                    self.resource_client.resource_groups.delete,
-                    name,
-                    raw=True
-                )
-        except CloudError:
-            pass
+    def remove_resource(self, name, **kwargs):
+        if self.is_live:
+            try:
+                if 'wait_timeout' in kwargs:
+                    azure_poller = self.client.resource_groups.delete(name)
+                    azure_poller.wait(kwargs.get('wait_timeout'))
+                    if azure_poller.done():
+                        return
+                    raise AzureTestError('Timed out waiting for resource group to be deleted.')
+                else:
+                    self.client.resource_groups.delete(name, raw=True)
+            except CloudError:
+                pass

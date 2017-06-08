@@ -1,1 +1,1 @@
-TEST_SETTING_FILENAME = 'testsettings_local.json'
+TEST_SETTING_FILENAME = 'testsettings_local.cfg'

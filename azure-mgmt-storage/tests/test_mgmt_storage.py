@@ -8,11 +8,8 @@
 import unittest
 
 import azure.mgmt.storage.models
-from azure.common.client_factory import get_client_from_cli_profile
-from testutils.common_recordingtestcase import record
-from tests.mgmt_testcase import HttpStatusCode, AzureMgmtTestCase
-from .mgmt_testcase import ResourceGroupPreparer
-from .storage_testcase import StorageAccountPreparer
+
+from mgmt_testcase import AzureMgmtTestCase, ResourceGroupPreparer
 
 
 class MgmtStorageTest(AzureMgmtTestCase):

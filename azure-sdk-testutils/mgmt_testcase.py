@@ -13,7 +13,7 @@ from azure.mgmt.resource import ResourceManagementClient
 from azure_devtools.scenario_tests import (ReplayableTest, AzureTestError,
                                            AbstractPreparer, SingleValueReplacer)
 from testutils.config import TEST_SETTING_FILENAME
-import tests.mgmt_settings_fake as fake_settings
+import mgmt_settings_fake as fake_settings
 
 
 should_log = os.getenv('SDK_TESTS_LOG', '0')
@@ -73,7 +73,7 @@ class AzureMgmtTestCase(ReplayableTest):
 
         self.fake_settings = fake_settings
         if self.is_live:
-            import tests.mgmt_settings_real as real_settings
+            import mgmt_settings_real as real_settings
             self.settings = real_settings
         else:
             self.settings = self.fake_settings

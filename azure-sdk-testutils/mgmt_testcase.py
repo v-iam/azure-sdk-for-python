@@ -11,8 +11,11 @@ import zlib
 from azure.common.exceptions import CloudError
 from azure.mgmt.resource import ResourceManagementClient
 
-from azure_devtools.scenario_tests import (ReplayableTest, AzureTestError,
-                                           AbstractPreparer, SingleValueReplacer)
+from azure_devtools.scenario_tests import (
+    ReplayableTest, AzureTestError,
+    AbstractPreparer, GeneralNameReplacer,
+    OAuthRequestResponsesFilter, DeploymentNameReplacer,
+)
 from testutils.config import TEST_SETTING_FILENAME
 import mgmt_settings_fake as fake_settings
 
@@ -64,30 +67,61 @@ def get_qualified_test_name(test_object, method_name):
 
 
 class AzureMgmtTestCase(ReplayableTest):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, method_name, config_file=None,
+                 recording_dir=None, recording_name=None,
+                 recording_processors=None, replay_processors=None,
+                 recording_patches=None, replay_patches=None):
         self.working_folder = os.path.dirname(__file__)
+        self.qualified_test_name = get_qualified_test_name(self, method_name)
+        self._fake_settings, self._real_settings = self._load_settings()
+        self.region = 'westus'
+        self.scrubber = GeneralNameReplacer()
+        super(AzureMgmtTestCase, self).__init__(
+            method_name,
+            config_file=config_file or os.path.join(self.working_folder, TEST_SETTING_FILENAME),
+            recording_dir=recording_dir,
+            recording_name=recording_name or self.qualified_test_name,
+            recording_processors=recording_processors or self._get_recording_processors(),
+            replay_processors=replay_processors,
+            recording_patches=recording_patches,
+            replay_patches=replay_patches,
+        )
 
-        kwargs.setdefault('config_file',
-                          os.path.join(self.working_folder, TEST_SETTING_FILENAME))
+    @property
+    def settings(self):
+        if self.is_live:
+            if self._real_settings:
+                return self._real_settings
+            else:
+                raise AzureTestError('Need a mgmt_settings_real.py file to run tests live.')
+        else:
+            return self._fake_settings
 
-        self.qualified_test_name = get_qualified_test_name(self, args[0])
-        kwargs.setdefault('recording_name', self.qualified_test_name)
+    def _load_settings(self):
+        try:
+            import mgmt_settings_real as real_settings
+            return fake_settings, real_settings
+        except ImportError:
+            return fake_settings, None
 
-        super(AzureMgmtTestCase, self).__init__(*args, **kwargs)
+    def _get_recording_processors(self):
+        return [
+            self.scrubber,
+            OAuthRequestResponsesFilter(),
+            DeploymentNameReplacer(),
+        ]
 
     def is_playback(self):
         return not self.is_live
 
+    def _setup_scrubber(self):
+        constants_to_scrub = ['SUBSCRIPTION_ID', 'AD_DOMAIN', 'TENANT_ID', 'CLIENT_OID']
+        for key in constants_to_scrub:
+            if hasattr(self.settings, key) and hasattr(self._fake_settings, key):
+                self.scrubber.register_name_pair(getattr(self.settings, key),
+                                                 getattr(self._fake_settings, key))
+
     def setUp(self):
-        super(AzureMgmtTestCase, self).setUp()
-
-        self.fake_settings = fake_settings
-        if self.is_live:
-            import mgmt_settings_real as real_settings
-            self.settings = real_settings
-        else:
-            self.settings = self.fake_settings
-
         # Every test uses a different resource group name calculated from its
         # qualified test name.
         #
@@ -103,10 +137,8 @@ class AzureMgmtTestCase(ReplayableTest):
         # would make resource group creation fail.
         # To avoid that, we also delete the resource group in the
         # setup, and we wait for that delete to complete.
-        #self.group_name = self.get_resource_name(
-        #    self.qualified_test_name.replace('.', '_')
-        #)
-        self.region = 'westus'
+        self._setup_scrubber()
+        super(AzureMgmtTestCase, self).setUp()
 
     def tearDown(self):
         return super(AzureMgmtTestCase, self).tearDown()
@@ -158,7 +190,13 @@ class AzureMgmtTestCase(ReplayableTest):
         )
 
     def create_random_name(self, name):
-        return get_resource_name(name, self.qualified_test_name.encode())
+        moniker = get_resource_name(name, self.qualified_test_name.encode())
+
+        # if self.in_recording:
+        #     logger.warning('{} -> {}'.format(name, moniker))
+        #     self.scrubber.register_name_pair(name, moniker)
+
+        return moniker
 
     def get_resource_name(self, name):
         """Alias to create_random_name for back compatibility."""
@@ -168,18 +206,8 @@ class AzureMgmtTestCase(ReplayableTest):
         """Random name generation for use by preparers."""
         return self.get_resource_name(self.qualified_test_name.replace('.', '_'))
 
-    def _scrub(self, val):
-        val = super(AzureMgmtTestCase, self)._scrub(val)
 
-        constants_to_scrub = ['SUBSCRIPTION_ID', 'AD_DOMAIN', 'TENANT_ID', 'CLIENT_OID']
-
-        real_to_fake_dict = {getattr(self.settings, key): getattr(self.fake_settings, key) for key in constants_to_scrub if
-                             hasattr(self.settings, key) and hasattr(self.fake_settings, key)}
-        val = self._scrub_using_dict(val, real_to_fake_dict)
-        return val
-
-
-class AzureMgmtPreparer(AbstractPreparer, SingleValueReplacer):
+class AzureMgmtPreparer(AbstractPreparer):
     def __init__(self, name_prefix, random_name_length,
                  disable_recording=True,
                  playback_fake_resource=None):
@@ -191,6 +219,9 @@ class AzureMgmtPreparer(AbstractPreparer, SingleValueReplacer):
     @property
     def is_live(self):
         return self.test_class_instance.is_live
+
+    def create_random_name(self):
+        return self.test_class_instance.get_preparer_resource_name()
 
     @property
     def moniker(self):
@@ -205,12 +236,13 @@ class AzureMgmtPreparer(AbstractPreparer, SingleValueReplacer):
         the URIs don't change and tests don't need to be re-recorded.
         """
         if not self.resource_moniker:
-            self.resource_moniker = self.test_class_instance.get_preparer_resource_name()
+            self.resource_moniker = self.random_name
         return self.resource_moniker
 
     def create_mgmt_client(self, client_class, **kwargs):
         return client_class(
             credentials=self.test_class_instance.settings.get_credentials(),
+            subscription_id=self.test_class_instance.settings.SUBSCRIPTION_ID,
             **kwargs
         )
 

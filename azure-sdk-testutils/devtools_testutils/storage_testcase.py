@@ -33,6 +33,7 @@ class StorageAccountPreparer(AzureMgmtPreparer):
         self.kind = kind
         self.resource_group_parameter_name = resource_group_parameter_name
         self.parameter_name = parameter_name
+        self.storage_key = ''
 
     def create_resource(self, name, **kwargs):
         if self.is_live:
@@ -48,9 +49,15 @@ class StorageAccountPreparer(AzureMgmtPreparer):
                 }
             )
             self.resource = storage_async_operation.result()
+            storage_keys = {
+                v.key_name: v.value
+                for v in self.client.storage_accounts.list_keys(group.name, name).keys
+            }
+            self.storage_key = storage_keys['key1']
 
         return {
             self.parameter_name: self.resource,
+            '{}_key'.format(self.parameter_name): self.storage_key,
         }
 
     def remove_resource(self, name, **kwargs):

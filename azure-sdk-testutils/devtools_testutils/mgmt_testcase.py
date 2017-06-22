@@ -188,16 +188,6 @@ class AzureMgmtTestCase(ReplayableTest):
         """Random name generation for use by preparers."""
         return self.get_resource_name(prefix or self.qualified_test_name.replace('.', '_'))
 
-    def _scrub(self, val):
-        val = super(AzureMgmtTestCase, self)._scrub(val)
-
-        constants_to_scrub = ['SUBSCRIPTION_ID', 'AD_DOMAIN', 'TENANT_ID', 'CLIENT_OID']
-
-        real_to_fake_dict = {getattr(self.settings, key): getattr(self.fake_settings, key) for key in constants_to_scrub if
-                             hasattr(self.settings, key) and hasattr(self.fake_settings, key)}
-        val = self._scrub_using_dict(val, real_to_fake_dict)
-        return val
-
 
 class AzureMgmtPreparer(AbstractPreparer):
     def __init__(self, name_prefix, random_name_length,

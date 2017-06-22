@@ -185,7 +185,10 @@ class AzureMgmtTestCase(ReplayableTest):
         return self.create_random_name(name)
 
     def get_preparer_resource_name(self, prefix):
-        """Random name generation for use by preparers."""
+        """Random name generation for use by preparers.
+
+        If prefix is a blank string, use the fully qualified test name instead.
+        This is what legacy tests do for resource groups."""
         return self.get_resource_name(prefix or self.qualified_test_name.replace('.', '_'))
 
 

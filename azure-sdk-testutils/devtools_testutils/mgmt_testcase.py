@@ -87,7 +87,7 @@ class AzureMgmtTestCase(ReplayableTest):
 
     def _load_settings(self):
         try:
-            import mgmt_settings_real as real_settings
+            from . import mgmt_settings_real as real_settings
             return fake_settings, real_settings
         except ImportError:
             return fake_settings, None
@@ -184,9 +184,9 @@ class AzureMgmtTestCase(ReplayableTest):
         """Alias to create_random_name for back compatibility."""
         return self.create_random_name(name)
 
-    def get_preparer_resource_name(self):
+    def get_preparer_resource_name(self, prefix):
         """Random name generation for use by preparers."""
-        return self.get_resource_name(self.qualified_test_name.replace('.', '_'))
+        return self.get_resource_name(prefix or self.qualified_test_name.replace('.', '_'))
 
     def _scrub(self, val):
         val = super(AzureMgmtTestCase, self)._scrub(val)
@@ -213,7 +213,7 @@ class AzureMgmtPreparer(AbstractPreparer):
         return self.test_class_instance.is_live
 
     def create_random_name(self):
-        return self.test_class_instance.get_preparer_resource_name()
+        return self.test_class_instance.get_preparer_resource_name(self.name_prefix)
 
     @property
     def moniker(self):

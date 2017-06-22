@@ -43,7 +43,7 @@ class StorageAccountPreparer(AzureMgmtPreparer):
                 group.name,
                 name,
                 {
-                    'sku': self.sku,
+                    'sku': {'name': self.sku},
                     'location': self.location,
                     'kind': self.kind,
                 }

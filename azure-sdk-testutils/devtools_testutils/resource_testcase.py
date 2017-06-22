@@ -18,7 +18,7 @@ FakeResource = namedtuple(
 
 
 class ResourceGroupPreparer(AzureMgmtPreparer):
-    def __init__(self, name_prefix='sdktest.rg',
+    def __init__(self, name_prefix='',
                  random_name_length=75,
                  parameter_name=RESOURCE_GROUP_PARAM,
                  parameter_name_for_location='location', location='westus',

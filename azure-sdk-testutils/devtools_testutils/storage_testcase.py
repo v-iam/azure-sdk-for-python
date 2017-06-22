@@ -20,7 +20,7 @@ FakeStorageAccount = FakeResource
 
 class StorageAccountPreparer(AzureMgmtPreparer):
     def __init__(self,
-                 name_prefix='sdktest',
+                 name_prefix='',
                  sku='Standard_LRS', location='westus', kind='storage',
                  parameter_name='storage_account',
                  resource_group_parameter_name=RESOURCE_GROUP_PARAM,

@@ -1,19 +1,16 @@
 from collections import namedtuple
 
+from azure.mgmt.media import MediaServicesManagementClient
 from azure.mgmt.resource import ResourceManagementClient
-from azure.mgmt.storage import StorageManagementClient
 from azure.mgmt.sql import SqlManagementClient
 
 from devtools_testutils import (
-    AzureMgmtTestCase, ResourceGroupPreparer, StorageAccountPreparer
+    AzureMgmtTestCase, ResourceGroupPreparer, StorageAccountPreparer, FakeResource
 )
 
 
-FakeStorageAccount = namedtuple(
-    'FakeStorageAccount',
-    ['name', 'kind']
-)
-FAKE_STORAGE = FakeStorageAccount(name='teststorage', kind='BlobStorage')
+FAKE_STORAGE_ID = 'STORAGE-FAKE-ID'
+FAKE_STORAGE = FakeResource(name='teststorage', id=FAKE_STORAGE_ID)
 
 
 class ExampleResourceGroupTestCase(AzureMgmtTestCase):
@@ -28,8 +25,7 @@ class ExampleResourceGroupTestCase(AzureMgmtTestCase):
             {'location': 'westus'}
         )
         self.assertEqual(group.name, test_group_name)
-        result_delete = self.client.resource_groups.delete(group.name)
-        result_delete.wait()
+        self.client.resource_groups.delete(group.name)
 
 
 class ExampleSqlServerTestCase(AzureMgmtTestCase):
@@ -37,8 +33,8 @@ class ExampleSqlServerTestCase(AzureMgmtTestCase):
         super(ExampleSqlServerTestCase, self).setUp()
         self.client = self.create_mgmt_client(SqlManagementClient)
 
-    @ResourceGroupPreparer()
-    def test_get_resource_groups(self, resource_group, location):
+    @ResourceGroupPreparer(location='westus2')
+    def test_create_sql_server(self, resource_group, location):
         test_server_name = self.get_resource_name('testsqlserver')
         server_creation = self.client.servers.create_or_update(
             resource_group.name,
@@ -55,16 +51,28 @@ class ExampleSqlServerTestCase(AzureMgmtTestCase):
         self.client.servers.delete(resource_group.name, server.name)
 
 
-class ExampleGetStorageTestCase(AzureMgmtTestCase):
+class ExampleMediaServiceTestCase(AzureMgmtTestCase):
     def setUp(self):
-        super(ExampleGetStorageTestCase, self).setUp()
-        self.client = self.create_mgmt_client(StorageManagementClient)
+        super(ExampleMediaServiceTestCase, self).setUp()
+        self.client = self.create_mgmt_client(MediaServicesManagementClient)
 
-    @ResourceGroupPreparer(parameter_name='group')
+    @ResourceGroupPreparer(parameter_name='group',
+                           location='westus')
     @StorageAccountPreparer(playback_fake_resource=FAKE_STORAGE,
-                            name_prefix='teststorageprops',
-                            resource_group_parameter_name='group',
-                            kind='BlobStorage')
-    def test_get_storage_properties(self, group, storage_account, storage_account_key):
-        props = self.client.storage_accounts.get_properties(group.name, storage_account.name)
-        self.assertEqual(storage_account.kind, 'BlobStorage')
+                            name_prefix='testmedia',
+                            resource_group_parameter_name='group')
+    def test_create_media_service(self, group, location, storage_account, storage_account_key):
+        test_media_name = self.get_resource_name('pymediatest')
+        media_obj = self.client.media_service.create(
+            group.name,
+            test_media_name,
+            {
+                'location': location,
+                'storage_accounts': [{
+                    'id': storage_account.id,
+                    'is_primary': True,
+                }]
+            }
+        )
+        self.assertEqual(media_obj.name, test_media_name)
+        self.client.media_service.delete(group.name, test_media_name)

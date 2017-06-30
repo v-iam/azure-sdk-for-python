@@ -5,6 +5,29 @@
 # Licensed under the MIT License. See License.txt in the project root for
 # license information.
 #--------------------------------------------------------------------------
+
+# NOTES ON PORTING THESE TESTS TO AZURE-DEVTOOLS
+# 1. In general these tests take a substantially different approach to creating
+#    helper resources: they set them up only once and use a global variable
+#    (EXISTING_RESOURCES) to track whether they’re available.
+#    This is not as amenable to porting to preparers as other tests.
+# 2. There’s also no name randomization since there’s no risk of conflict
+#    when all resources are shared between tests: instead, all names are kept in
+#    module-level constants. This means that converting to per-test resources
+#    and randomized names will require at least some passing names around,
+#    and all recordings will need to be re-recorded.
+# 3. Porting these tests might be better as a 2-step process: first port the
+#    batch tests to be more like other legacy tests, then port them to devtools.
+# 4. BatchAccountPreparer is the start of an attempt at porting the
+#    create_batch_account function to the preparer paradigm. But its practice
+#    of creating two clients with different credentials is very unusual
+#    and probably requires reaching into self.test_class_instance to pull out
+#    the credentials it stores in its settings attribute.
+# 5. That the tests here apply to both azure-mgmt-batch and azure-batch simultaneously
+#    is also weird, and difficult for porting since azure-sdk-testutils/devtools_testutils
+#    is oriented around management use cases. Splitting the batch and mgmt-batch
+#    tests would probably be ideal, but I don't know how feasible it is.
+
 import datetime
 import io
 import json

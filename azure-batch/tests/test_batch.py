@@ -16,6 +16,11 @@ import unittest
 
 import requests
 
+from devtools_testutils import (
+    AzureMgmtTestCase,
+    ResourceGroupPreparer, StorageAccountPreparer, KeyVaultPreparer,
+    AzureMgmtPreparer
+)
 from testutils.common_recordingtestcase import (
     RecordingTestCase,
     TestMode,
@@ -48,16 +53,6 @@ LOG = logging.getLogger('batch-python-tests')
 LOG.level = logging.WARNING
 LOG.addHandler(logging.StreamHandler())
 
-def init_tst_mode(working_folder):
-    try:
-        path = os.path.join(working_folder, 'testsettings_local.json')
-        with open(path) as testsettings_local_file:
-            test_settings = json.load(testsettings_local_file)
-        return test_settings['mode']
-    except:
-        return TestMode.playback
-
-
 def validate_shared_key_auth(adapter, request, *args, **kwargs):
     assert(request.headers['Authorization'].startswith('SharedKey '))
 
@@ -66,192 +61,111 @@ def validate_token_auth(adapter, request, *args, **kwargs):
     assert(request.headers['Authorization'].startswith('Bearer '))
 
 
-def create_mgmt_client(settings, client_class, **kwargs):
-    client = client_class(
-        credentials=settings.get_credentials(),
-        subscription_id=settings.SUBSCRIPTION_ID,
-        **kwargs
-    )
-    return client
-
-
-def create_resource_group(client):
-    group = {
-        'name': AZURE_RESOURCE_GROUP,
-        'location': AZURE_LOCATION
-    }
-    result_create = client.resource_groups.create_or_update(
-        AZURE_RESOURCE_GROUP,
-        group,
-    )
-    return result_create
-
-
-def create_keyvault(client):
-    result_create = client.vaults.create_or_update(
-        AZURE_RESOURCE_GROUP,
-        AZURE_KEY_VAULT,
-        {
-            'location': 'eastus2',
-            'properties': {
-                'sku': {'name': 'standard'},
-                'tenant_id': "72f988bf-86f1-41af-91ab-2d7cd011db47",
-                'enabled_for_deployment': True,
-                'enabled_for_disk_encryption': True,
-                'enabled_for_template_deployment': True,
-                'access_policies': [ {
-                    'tenant_id': "72f988bf-86f1-41af-91ab-2d7cd011db47",
-                    'object_id': "f520d84c-3fd3-4cc8-88d4-2ed25b00d27a",
-                    'permissions': {
-                        'keys': ['all'],
-                        'secrets': ['all']
-                    }
-                }]
-            }
-        })
-    return result_create
-
-
-def create_storage_account(client):
-    params = {
-        'sku': {'name': 'Standard_LRS'},
-        'kind': 'Storage',
-        'location': AZURE_LOCATION
-    }
-    result_create = client.storage_accounts.create(
-        AZURE_RESOURCE_GROUP,
-        AZURE_STORAGE_ACCOUNT,
-        params,
-    )
-    result_create.result()
-
-
-def create_storage_client(mgmt_client):
+def create_storage_client(account_key):
     import azure.storage.blob as storage
-    keys = mgmt_client.storage_accounts.list_keys(
-        AZURE_RESOURCE_GROUP,
-        AZURE_STORAGE_ACCOUNT)
-    account_key = keys.keys[0].value
     data_client = storage.BlockBlobService(AZURE_STORAGE_ACCOUNT, account_key)
     data_client.create_container(OUTPUT_CONTAINER, fail_on_exist=False)
     return data_client
 
 
-def create_batch_account(client, settings, live):
-    if live:
-        if not EXISTING_RESOURCES:
-            storage_resource = '/subscriptions/{}/resourceGroups/{}/providers/Microsoft.Storage/storageAccounts/{}'.format(
-                settings.SUBSCRIPTION_ID,
-                AZURE_RESOURCE_GROUP,
-                AZURE_STORAGE_ACCOUNT
-            )
+class BatchAccountPreparer(AzureMgmtPreparer):
+    """Preparer for batch accounts."""
+    def __init__(self, name_prefix='', resource_group_parameter_name='resource_group',
+                 location_parameter_name='location',
+                 storage_account_parameter_name='storage_account',
+                 sk_client_parameter_name='sk_batch_client',
+                 aad_client_parameter_name='aad_batch_client',
+                 disable_recording=False):
+        super(BatchAccountPreparer, self).__init__(name_prefix, 24,
+                                                   disable_recording=True)
+        self.resource_group_parameter_name = resource_group_parameter_name
+        self.location_parameter_name = location_parameter_name
+        self.storage_account_parameter_name = storage_account_parameter_name
+        self.sk_client_parameter_name = sk_client_parameter_name
+        self.aad_client_parameter_name = aad_client_parameter_name
+
+    def _get_support_param(self, param_name, **kwargs):
+        try:
+            return kwargs.get(param_name)
+        except KeyError:
+            template = 'BatchAccountPreparer needs a {} parameter. Please add a ' \
+                       'decorator in front of this one that provides it.'
+            raise AzureTestError(template.format(param_name))
+
+    def create_resource(self, name, **kwargs):
+        resource_group = self._get_support_param(self.resource_group_parameter_name)
+        location = self._get_support_param(self.location_parameter_name)
+        storage_acct = self._get_support_param(self.storage_account_parameter_name)
+        if self.live:
             batch_account = azure.mgmt.batch.models.BatchAccountCreateParameters(
-                location=AZURE_LOCATION,
-                auto_storage=azure.mgmt.batch.models.AutoStorageBaseProperties(storage_resource)
+                location=location,
+                auto_storage=azure.mgmt.batch.models.AutoStorageBaseProperties(storage_acct.id)
             )
-            account_setup = client.batch_account.create(AZURE_RESOURCE_GROUP, AZURE_BATCH_ACCOUNT, batch_account)
+            account_setup = self.batch_mgmt_client.batch_account.create(
+                resource_group.name, AZURE_BATCH_ACCOUNT, batch_account
+            )
             new_account = account_setup.result()
-        account_keys = client.batch_account.get_keys(AZURE_RESOURCE_GROUP, AZURE_BATCH_ACCOUNT)
-        shared_key_creds = SharedKeyCredentials(AZURE_BATCH_ACCOUNT, account_keys.primary)
-        aad_creds = ServicePrincipalCredentials(settings.BATCH_CLIENT_ID, settings.BATCH_SECRET,
-            tenant=AZURE_TENANT_ID,
-            resource='https://batch.core.windows.net/')
-    else:
-        shared_key_creds = SharedKeyCredentials(AZURE_BATCH_ACCOUNT, 'ZmFrZV9hY29jdW50X2tleQ==')
-        aad_creds = AADTokenCredentials(token={'access_token':'faked_token'})
-    url = "https://{}.{}.batch.azure.com/".format(AZURE_BATCH_ACCOUNT, AZURE_LOCATION)
-    sk_client = azure.batch.BatchServiceClient(shared_key_creds, base_url=url)
-    aad_client = azure.batch.BatchServiceClient(aad_creds, base_url=url)
-    return (sk_client, aad_client)
+
+            # This creation of two clients with separate credential methods
+            # is really unorthodox compared to other tests
+            # and I'm not sure of the best way to handle it using devtools.
+            account_keys = client.batch_account.get_keys(resource_group.name, AZURE_BATCH_ACCOUNT)
+            shared_key_creds = SharedKeyCredentials(AZURE_BATCH_ACCOUNT, account_keys.primary)
+            aad_creds = ServicePrincipalCredentials(
+                settings.BATCH_CLIENT_ID,
+                settings.BATCH_SECRET,
+                tenant=AZURE_TENANT_ID,
+                resource='https://batch.core.windows.net/'
+            )
+        else:
+            shared_key_creds = SharedKeyCredentials(AZURE_BATCH_ACCOUNT, 'ZmFrZV9hY29jdW50X2tleQ==')
+            aad_creds = AADTokenCredentials(token={'access_token': 'faked_token'})
+        url = "https://{}.{}.batch.azure.com/".format(AZURE_BATCH_ACCOUNT, AZURE_LOCATION)
+        sk_client = azure.batch.BatchServiceClient(shared_key_creds, base_url=url)
+        aad_client = azure.batch.BatchServiceClient(aad_creds, base_url=url)
+        return (sk_client, aad_client)
 
 
-class BatchMgmtTestCase(RecordingTestCase):
-
-    @classmethod
-    def setUpClass(cls):
+class BatchMgmtTestCase(AzureMgmtTestCase):
+    def setUp(self):
+        super(BatchMgmtTestCase, self).setUp()
         LOG.warning('Starting Batch tests')
         LOG.debug("Setting up Batch tests:")
-        cls.working_folder = os.path.dirname(__file__)
         try:
-            cls.test_mode = init_tst_mode(cls.working_folder)
-            cls.fake_settings = fake_settings
-            if TestMode.is_playback(cls.test_mode):
-                LOG.debug("    running in playback mode")
-                cls.live = False
-                cls.settings = cls.fake_settings
-            else:
-                LOG.debug("    running in live mode")
-                import tests.mgmt_settings_real as real_settings
-                cls.settings = real_settings
-                cls.live = True
-            LOG.debug('    creating resource client')
-            cls.resource_client = create_mgmt_client(cls.settings,
-                azure.mgmt.resource.resources.ResourceManagementClient
-            )
-            LOG.debug('    creating keyvault client')
-            cls.keyvault_client = create_mgmt_client(cls.settings,
-                azure.mgmt.keyvault.KeyVaultManagementClient
-            )
-            LOG.debug('    creating storage client')
-            cls.storage_client = create_mgmt_client(cls.settings,
-                azure.mgmt.storage.StorageManagementClient
-            )
             LOG.debug('    creating batch client')
-            cls.batch_mgmt_client = create_mgmt_client(cls.settings,
+            self.batch_mgmt_client = self.create_mgmt_client(
                 azure.mgmt.batch.BatchManagementClient
             )
-            if cls.live:
-                if not EXISTING_RESOURCES:
-                    LOG.debug('    creating resource group')
-                    create_resource_group(cls.resource_client)
-                    LOG.debug('    creating storage')
-                    create_storage_account(cls.storage_client)
-                    LOG.debug('    creating keyvault')
-                    create_keyvault(cls.keyvault_client)
-                cls.storage_data_client = create_storage_client(cls.storage_client)
+            if self.is_live:
+                self.storage_data_client = create_storage_client(self.storage_client)
             else:
-                cls.storage_data_client = None
+                self.storage_data_client = None
             LOG.debug('    creating batch account')
-            cls.batch_client_sk, cls.batch_client_aad = create_batch_account(cls.batch_mgmt_client, cls.settings, cls.live)
+            self.batch_client_sk, self.batch_client_aad = create_batch_account(
+                self.batch_mgmt_client, self.settings, self.live
+            )
         except Exception as err:
-            cls.tearDownClass()
+            self.tearDown()
             raise AssertionError("Failed to setup Batch Account: {}".format(err))
         LOG.debug("    finished setup")
-        return super(BatchMgmtTestCase, cls).setUpClass()
 
-    @classmethod
-    def tearDownClass(cls):
+    def tearDown(self):
         LOG.debug("Tearing down Batch resources:")
-        if cls.live and CLEAN_UP:
+        if self.live and CLEAN_UP:
             try:
                 LOG.debug("    deleting Batch account")
-                deleting = cls.batch_mgmt_client.batch_account.delete(
+                deleting = self.batch_mgmt_client.batch_account.delete(
                     AZURE_RESOURCE_GROUP, AZURE_BATCH_ACCOUNT)
                 deleting.wait()
             except: pass # This should get deleted with the resource group anyway
-            try:
-                LOG.debug("    deleting storage")
-                cls.storage_client.storage_accounts.delete(
-                    AZURE_RESOURCE_GROUP, AZURE_STORAGE_ACCOUNT)
-            except: pass
-            try:
-                LOG.debug("    deleting resource group")
-                deleting = cls.resource_client.resource_groups.delete(AZURE_RESOURCE_GROUP)
-                deleting.wait()
-            except: pass
         LOG.debug("    finished")
         LOG.warning("Batch tests complete")
-        return super(BatchMgmtTestCase, cls).tearDownClass()
+        return super(BatchMgmtTestCase, self).tearDown()
 
-    def _scrub(self, val):
-        if not hasattr(val, 'replace'):
-            return val
-        val = super(BatchMgmtTestCase, self)._scrub(val)
-        real_to_fake_dict = {
-            self.settings.SUBSCRIPTION_ID: self.fake_settings.SUBSCRIPTION_ID,
-        }
-        val = self._scrub_using_dict(val, real_to_fake_dict)
-        return val
+    @property
+    def live(self):
+        """Convenient alias to avoid having to replace this attr reference"""
+        return self.is_live
 
     def _generate_container_sas_token(self):
         """Generate a container URL with SAS token."""
@@ -340,7 +254,9 @@ class BatchMgmtTestCase(RecordingTestCase):
             message += "\n".join(["{}: {!r}".format(k, v) for k, v in errors.items()])
             raise AssertionError(message)
 
-    @record
+    @ResourceGroupPreparer()
+    @StorageAccountPreparer()
+    @KeyVaultPreparer(location='eastus2')
     def test_batch_accounts(self):
         _e = {}
 
